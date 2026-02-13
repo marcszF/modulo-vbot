@@ -159,7 +159,10 @@ function safeStorage(path, defaultValue)
     storage = storage or {}
     local keys = path
     if type(path) == "string" then
-        keys = string.split(path, ".")
+        keys = {}
+        for part in string.gmatch(path, "[^%.]+") do
+            table.insert(keys, part)
+        end
     end
     if type(keys) ~= "table" then return nil end
     local node = storage
@@ -195,7 +198,7 @@ function debounce(fn, delay)
     local event = nil
     return function(...)
         local args = {...}
-        if event and removeEvent then removeEvent(event) end
+        if event and type(removeEvent) == "function" then removeEvent(event) end
         event = schedule(delay, function() fn(unpack(args)) end)
     end
 end
@@ -1441,8 +1444,9 @@ function getPartyMembers()
 end
 
 function isPartyLeader()
-    if player and player.isPartyLeader then
-        return player:isPartyLeader()
+    local localPlayer = g_game.getLocalPlayer()
+    if localPlayer and localPlayer.isPartyLeader then
+        return localPlayer:isPartyLeader()
     end
     return false
 end
