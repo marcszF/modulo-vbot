@@ -8,8 +8,9 @@ vBot.standTime = now
 vBot.isUsingPotion = false
 vBot.isUsing = false
 vBot.customCooldowns = {}
-local MAX_STACK_SIZE = (rawget(_G, "storage") and storage.maxStackSize) or 100
+local MAX_STACK_SIZE = (rawget(_G, "storage") and storage.maxStackSize) or 100 -- default stack size for most items
 local SPELL_CACHE_LIMIT = 200
+local SPELL_CACHE_TTL = 5000
 local MINIMAP_COLOR_STAIR_MIN = 210
 local MINIMAP_COLOR_STAIR_MAX = 213
 
@@ -450,12 +451,12 @@ end
 -- ie:['Spell Name'] = {id, words, exhaustion, premium, type, icon, mana, level, soul, group, vocations}
 -- cooldown detection module
 local SpellDataCache = {}
-local SpellDataCacheCount = 0
+local SpellDataCacheOrder = {}
 function getSpellData(spell)
     if not spell then return false end
     spell = spell:lower()
     local cached = SpellDataCache[spell]
-    if cached and now - cached.time < 5000 then return cached.result end
+    if cached and now - cached.time < SPELL_CACHE_TTL then return cached.result end
     local t = nil
     local c = nil
     for k, v in pairs(Spells) do
@@ -479,10 +480,10 @@ function getSpellData(spell)
         result = c
     end
     if not SpellDataCache[spell] then
-        SpellDataCacheCount = SpellDataCacheCount + 1
-        if SpellDataCacheCount > SPELL_CACHE_LIMIT then
-            SpellDataCache = {}
-            SpellDataCacheCount = 0
+        table.insert(SpellDataCacheOrder, spell)
+        if #SpellDataCacheOrder > SPELL_CACHE_LIMIT then
+            local oldest = table.remove(SpellDataCacheOrder, 1)
+            SpellDataCache[oldest] = nil
         end
     end
     SpellDataCache[spell] = {result = result, time = now}
@@ -1151,7 +1152,7 @@ function autoSwapRing(ringId, hpLow, hpHigh)
                 return true
             end
         end
-    elseif hpHigh and slotItem and slotItem:getId() == ringId then
+    elseif hpHigh and hp >= hpHigh and slotItem and slotItem:getId() == ringId then
         for _, container in pairs(getContainers()) do
             if not containerIsFull(container) then
                 g_game.move(slotItem,
@@ -1236,6 +1237,7 @@ end
 
 function autoStackItems(id)
     if not id then return false end
+    local moved = false
     for _, container in pairs(getContainers()) do
         local target = nil
         local targetIndex = nil
@@ -1252,12 +1254,12 @@ function autoStackItems(id)
                 if item ~= target and item:getId() == id and item:isStackable() then
                     g_game.move(item, container:getSlotPosition(targetIndex),
                                 item:getCount())
-                    return true
+                    moved = true
                 end
             end
         end
     end
-    return false
+    return moved
 end
 
 -- pos can be tile or position
@@ -1326,11 +1328,16 @@ end
 function isPositionSafe(position, range)
     if not position then return false end
     if not range then range = 6 end
-    if getMonstersInRange(position, range) > 0 then return false end
-    for _, spec in pairs(getSpectators(true)) do
-        if spec:isPlayer() and not spec:isLocalPlayer() and
-            not isFriend(spec:getName()) then
-            if getDistanceBetween(position, spec:getPosition()) <= range then
+    local specs = getSpectatorsCached(nil, 100, true)
+    for _, spec in pairs(specs) do
+        local distance = getDistanceBetween(position, spec:getPosition())
+        if distance <= range then
+            if spec:isMonster() and
+                (g_game.getClientVersion() < 960 or spec:getType() < 3) then
+                return false
+            end
+            if spec:isPlayer() and not spec:isLocalPlayer() and
+                not isFriend(spec:getName()) then
                 return false
             end
         end
