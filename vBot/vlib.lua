@@ -512,7 +512,13 @@ function isEnemy(c)
     end
 end
 
+local PlayerDistributionCache = {friends = {}, neutrals = {}, enemies = {}, time = 0}
 function getPlayerDistribution()
+    if now - PlayerDistributionCache.time < 100 then
+        return PlayerDistributionCache.friends, PlayerDistributionCache.neutrals,
+               PlayerDistributionCache.enemies
+    end
+
     local friends = {}
     local neutrals = {}
     local enemies = {}
@@ -528,6 +534,12 @@ function getPlayerDistribution()
         end
     end
 
+    PlayerDistributionCache = {
+        friends = friends,
+        neutrals = neutrals,
+        enemies = enemies,
+        time = now
+    }
     return friends, neutrals, enemies
 end
 
@@ -561,52 +573,37 @@ end
 
 -- returns dressed-up item id based on not dressed id
 -- returns number
+local ActiveItemIdMap = {
+    [3049] = 3086,
+    [3050] = 3087,
+    [3051] = 3088,
+    [3052] = 3089,
+    [3053] = 3090,
+    [3091] = 3094,
+    [3092] = 3095,
+    [3093] = 3096,
+    [3097] = 3099,
+    [3098] = 3100,
+    [16114] = 16264,
+    [23531] = 23532,
+    [23533] = 23534,
+    [23544] = 23528,
+    [23529] = 23530,
+    [30343] = 30342, -- Sleep Shawl
+    [30344] = 30345, -- Enchanted Pendulet
+    [30403] = 30402, -- Enchanted Theurgic Amulet
+    [31621] = 31616, -- Blister Ring
+    [32621] = 32635 -- Ring of Souls
+}
+local InactiveItemIdMap = {}
+for inactiveId, activeId in pairs(ActiveItemIdMap) do
+    InactiveItemIdMap[activeId] = inactiveId
+end
+
 function getActiveItemId(id)
     if not id then return false end
 
-    if id == 3049 then
-        return 3086
-    elseif id == 3050 then
-        return 3087
-    elseif id == 3051 then
-        return 3088
-    elseif id == 3052 then
-        return 3089
-    elseif id == 3053 then
-        return 3090
-    elseif id == 3091 then
-        return 3094
-    elseif id == 3092 then
-        return 3095
-    elseif id == 3093 then
-        return 3096
-    elseif id == 3097 then
-        return 3099
-    elseif id == 3098 then
-        return 3100
-    elseif id == 16114 then
-        return 16264
-    elseif id == 23531 then
-        return 23532
-    elseif id == 23533 then
-        return 23534
-    elseif id == 23544 then
-        return 23528
-    elseif id == 23529 then
-        return 23530
-    elseif id == 30343 then -- Sleep Shawl
-        return 30342
-    elseif id == 30344 then -- Enchanted Pendulet
-        return 30345
-    elseif id == 30403 then -- Enchanted Theurgic Amulet
-        return 30402
-    elseif id == 31621 then -- Blister Ring
-        return 31616
-    elseif id == 32621 then -- Ring of Souls
-        return 32635
-    else
-        return id
-    end
+    return ActiveItemIdMap[id] or id
 end
 
 -- returns not dressed item id based on dressed-up id
@@ -614,47 +611,7 @@ end
 function getInactiveItemId(id)
     if not id then return false end
 
-    if id == 3086 then
-        return 3049
-    elseif id == 3087 then
-        return 3050
-    elseif id == 3088 then
-        return 3051
-    elseif id == 3089 then
-        return 3052
-    elseif id == 3090 then
-        return 3053
-    elseif id == 3094 then
-        return 3091
-    elseif id == 3095 then
-        return 3092
-    elseif id == 3096 then
-        return 3093
-    elseif id == 3099 then
-        return 3097
-    elseif id == 3100 then
-        return 3098
-    elseif id == 16264 then
-        return 16114
-    elseif id == 23532 then
-        return 23531
-    elseif id == 23534 then
-        return 23533
-    elseif id == 23530 then
-        return 23529
-    elseif id == 30342 then -- Sleep Shawl
-        return 30343
-    elseif id == 30345 then -- Enchanted Pendulet
-        return 30344
-    elseif id == 30402 then -- Enchanted Theurgic Amulet
-        return 30403
-    elseif id == 31616 then -- Blister Ring
-        return 31621
-    elseif id == 32635 then -- Ring of Souls
-        return 32621
-    else
-        return id
-    end
+    return InactiveItemIdMap[id] or id
 end
 
 -- returns amount of monsters within the range of position
@@ -802,6 +759,92 @@ function itemAmount(id)
     return player:getItemsCount(id)
 end
 
+if not getHealthPercent then
+    function getHealthPercent()
+        if player and player.getHealthPercent then
+            return player:getHealthPercent()
+        end
+        if player and player.getHealth and player.getMaxHealth then
+            local maxHealth = player:getMaxHealth()
+            if maxHealth and maxHealth > 0 then
+                return math.floor((player:getHealth() / maxHealth) * 100)
+            end
+        end
+        return 0
+    end
+end
+
+if not getManaPercent then
+    function getManaPercent()
+        if player and player.getManaPercent then
+            return player:getManaPercent()
+        end
+        if player and player.getMana and player.getMaxMana then
+            local maxMana = player:getMaxMana()
+            if maxMana and maxMana > 0 then
+                return math.floor((player:getMana() / maxMana) * 100)
+            end
+        end
+        return 0
+    end
+end
+
+if not hasManaShield then
+    function hasManaShield()
+        if player and player.hasState and PlayerStates and PlayerStates.ManaShield then
+            return player:hasState(PlayerStates.ManaShield)
+        end
+        if player and player.isManaShielded then
+            return player:isManaShielded()
+        end
+        return false
+    end
+end
+
+if not findItems then
+    function findItems(ids)
+        if type(ids) ~= "table" then return {} end
+        local items = {}
+        for _, id in ipairs(ids) do
+            local item = findItem(id)
+            if item then table.insert(items, item) end
+        end
+        return items
+    end
+end
+
+if not isPositionValid then
+    function isPositionValid(position)
+        if not position then return false end
+        local tile = g_map.getTile(position)
+        return tile and tile:isWalkable() or false
+    end
+end
+
+if not getSpectatorStats then
+    function getSpectatorStats(range, multifloor)
+        if not range then range = 10 end
+        local stats = {monsters = 0, players = 0, npcs = 0, allies = 0}
+        for _, spec in pairs(getSpectators(multifloor)) do
+            if distanceFromPlayer(spec:getPosition()) <= range then
+                if spec:isMonster() and
+                    (g_game.getClientVersion() < 960 or spec:getType() < 3) then
+                    stats.monsters = stats.monsters + 1
+                elseif spec:isNpc() then
+                    stats.npcs = stats.npcs + 1
+                elseif spec:isPlayer() and not spec:isLocalPlayer() then
+                    if isFriend(spec) then
+                        stats.allies = stats.allies + 1
+                    else
+                        stats.players = stats.players + 1
+                    end
+                end
+            end
+        end
+        return stats
+    end
+end
+
 -- self explanatory
 -- a is item to use on
 -- b is item to use a on
@@ -861,6 +904,7 @@ function reachGroundItem(id)
     if not id then return false end
 
     local dest = nil
+    local destPos = nil
     for i, tile in ipairs(g_map.getTiles(posz())) do
         for j, item in ipairs(tile:getItems()) do
             local iPos = item:getPosition()
@@ -869,6 +913,7 @@ function reachGroundItem(id)
                 if findPath(pos(), iPos, 20,
                             {ignoreNonPathable = true, precision = 1}) then
                     dest = item
+                    destPos = iPos
                     break
                 end
             end
@@ -876,7 +921,7 @@ function reachGroundItem(id)
     end
 
     if dest then
-        return autoWalk(iPos, 20, {ignoreNonPathable = true, precision = 1})
+        return autoWalk(destPos, 20, {ignoreNonPathable = true, precision = 1})
     else
         return false
     end
