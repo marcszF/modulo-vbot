@@ -8,6 +8,13 @@ vBot.standTime = now
 vBot.isUsingPotion = false
 vBot.isUsing = false
 vBot.customCooldowns = {}
+-- default stack size (override via storage.maxStackSize if needed)
+local MAX_STACK_SIZE = (rawget(_G, "storage") and storage.maxStackSize) or 100
+local SPELL_CACHE_LIMIT = 200
+local SPELL_CACHE_TTL = 5000
+local SPECTATORS_CACHE_TTL = 100
+local MINIMAP_COLOR_STAIR_MIN = 210
+local MINIMAP_COLOR_STAIR_MAX = 213
 
 function logInfo(text)
     local timestamp = os.date("%H:%M:%S")
@@ -15,6 +22,64 @@ function logInfo(text)
     local start = timestamp.." [vBot]: "
 
     return modules.client_terminal.addLine(start..text, "orange")
+end
+
+function logWarn(text)
+    local timestamp = os.date("%H:%M:%S")
+    text = tostring(text)
+    local start = timestamp.." [vBot]: "
+
+    return modules.client_terminal.addLine(start..text, "yellow")
+end
+
+function logError(text)
+    local timestamp = os.date("%H:%M:%S")
+    text = tostring(text)
+    local start = timestamp.." [vBot]: "
+
+    return modules.client_terminal.addLine(start..text, "red")
+end
+
+function logTable(tbl, prefix, visited, depth, maxDepth)
+    if type(tbl) ~= "table" then return logInfo(tostring(tbl)) end
+    prefix = prefix or ""
+    visited = visited or {}
+    depth = depth or 0
+    maxDepth = maxDepth or 5
+    if visited[tbl] then
+        return logInfo(prefix.."*circular*")
+    end
+    if depth > maxDepth then
+        return logInfo(prefix.."*max depth*")
+    end
+    visited[tbl] = true
+    for key, value in pairs(tbl) do
+        if type(value) == "table" then
+            logInfo(prefix..tostring(key)..":")
+            logTable(value, prefix.."  ", visited, depth + 1, maxDepth)
+        else
+            logInfo(prefix..tostring(key)..": "..tostring(value))
+        end
+    end
+end
+
+function clamp(value, minValue, maxValue)
+    if value < minValue then return minValue end
+    if value > maxValue then return maxValue end
+    return value
+end
+
+function round(value, decimals)
+    local mult = 10 ^ (decimals or 0)
+    return math.floor(value * mult + 0.5) / mult
+end
+
+function formatTime(seconds)
+    seconds = tonumber(seconds) or 0
+    local hrs = math.floor(seconds / 3600)
+    local mins = math.floor((seconds % 3600) / 60)
+    local secs = math.floor(seconds % 60)
+    return string.format("%02d:%02d:%02d", hrs, mins, secs)
 end
 
 -- scripts / functions
@@ -104,6 +169,65 @@ function getFirstNumberInText(text)
     local n = nil
     if string.match(text, "%d+") then n = tonumber(string.match(text, "%d+")) end
     return n
+end
+
+function safeStorage(path, defaultValue)
+    if not path then return nil end
+    storage = storage or {}
+    local keys = path
+    if type(path) == "string" then
+        keys = {}
+        for part in string.gmatch(path, "[^%.]+") do
+            table.insert(keys, part)
+        end
+    end
+    if type(keys) ~= "table" then return nil end
+    local node = storage
+    for i = 1, #keys - 1 do
+        local key = keys[i]
+        if type(node[key]) ~= "table" then node[key] = {} end
+        node = node[key]
+    end
+    local lastKey = keys[#keys]
+    if node[lastKey] == nil then node[lastKey] = defaultValue end
+    return node[lastKey]
+end
+
+function waitUntil(timeout, checkFn, cb)
+    if type(checkFn) ~= "function" then return false end
+    local start = now
+    local function poll()
+        if checkFn() then
+            if cb then cb(true) end
+            return true
+        end
+        if now - start >= timeout then
+            if cb then cb(false) end
+            return false
+        end
+        schedule(50, poll)
+    end
+    poll()
+    return true
+end
+
+function debounce(fn, delay)
+    local event = nil
+    return function(...)
+        local args = {...}
+        if event and type(removeEvent) == "function" then removeEvent(event) end
+        event = schedule(delay, function() fn(unpack(args)) end)
+    end
+end
+
+function throttle(fn, delay)
+    local lastCall = 0
+    return function(...)
+        if now - lastCall >= delay then
+            lastCall = now
+            return fn(...)
+        end
+    end
 end
 
 -- function to search if item of given ID can be found on certain tile
@@ -328,9 +452,13 @@ end
 -- returns table
 -- ie:['Spell Name'] = {id, words, exhaustion, premium, type, icon, mana, level, soul, group, vocations}
 -- cooldown detection module
+local SpellDataCache = {}
+local SpellDataCacheOrder = {}
 function getSpellData(spell)
     if not spell then return false end
     spell = spell:lower()
+    local cached = SpellDataCache[spell]
+    if cached and now - cached.time < SPELL_CACHE_TTL then return cached.result end
     local t = nil
     local c = nil
     for k, v in pairs(Spells) do
@@ -347,13 +475,21 @@ function getSpellData(spell)
             end
         end
     end
+    local result = false
     if t then
-        return Spells[t]
+        result = Spells[t]
     elseif c then
-        return c
-    else
-        return false
+        result = c
     end
+    if not SpellDataCache[spell] then
+        table.insert(SpellDataCacheOrder, spell)
+        if #SpellDataCacheOrder > SPELL_CACHE_LIMIT then
+            local oldest = table.remove(SpellDataCacheOrder, 1)
+            SpellDataCache[oldest] = nil
+        end
+    end
+    SpellDataCache[spell] = {result = result, time = now}
+    return result
 end
 
 -- based on info extracted by getSpellData checks if spell is on cooldown
@@ -376,6 +512,28 @@ function getSpellCoolDown(text)
     else
         return false
     end
+end
+
+function getSpellCooldownRemaining(spell)
+    if type(spell) ~= "string" then return 0 end
+    spell = spell:lower()
+    if SpellCastTable[spell] then
+        local elapsed = now - SpellCastTable[spell].t
+        return math.max(0, SpellCastTable[spell].d - elapsed)
+    end
+    return 0
+end
+
+function isGroupCooldownActive(groupId)
+    if not groupId then return false end
+    return modules.game_cooldown.isGroupCooldownIconActive(groupId)
+end
+
+function smartCast(spell, delay)
+    if not spell then return false end
+    if getSpellCoolDown(spell) then return false end
+    if not canCast(spell) then return false end
+    return cast(spell, delay)
 end
 
 -- global var to indicate that player is trying to do something
@@ -512,7 +670,13 @@ function isEnemy(c)
     end
 end
 
+local PlayerDistributionCache = {friends = {}, neutrals = {}, enemies = {}, time = 0}
 function getPlayerDistribution()
+    if now - PlayerDistributionCache.time < 100 then
+        return PlayerDistributionCache.friends, PlayerDistributionCache.neutrals,
+               PlayerDistributionCache.enemies
+    end
+
     local friends = {}
     local neutrals = {}
     local enemies = {}
@@ -528,6 +692,12 @@ function getPlayerDistribution()
         end
     end
 
+    PlayerDistributionCache = {
+        friends = friends,
+        neutrals = neutrals,
+        enemies = enemies,
+        time = now
+    }
     return friends, neutrals, enemies
 end
 
@@ -561,52 +731,37 @@ end
 
 -- returns dressed-up item id based on not dressed id
 -- returns number
+local ActiveItemIdMap = {
+    [3049] = 3086,
+    [3050] = 3087,
+    [3051] = 3088,
+    [3052] = 3089,
+    [3053] = 3090,
+    [3091] = 3094,
+    [3092] = 3095,
+    [3093] = 3096,
+    [3097] = 3099,
+    [3098] = 3100,
+    [16114] = 16264,
+    [23531] = 23532,
+    [23533] = 23534,
+    [23544] = 23528,
+    [23529] = 23530,
+    [30343] = 30342, -- Sleep Shawl
+    [30344] = 30345, -- Enchanted Pendulet
+    [30403] = 30402, -- Enchanted Theurgic Amulet
+    [31621] = 31616, -- Blister Ring
+    [32621] = 32635 -- Ring of Souls
+}
+local InactiveItemIdMap = {}
+for inactiveId, activeId in pairs(ActiveItemIdMap) do
+    InactiveItemIdMap[activeId] = inactiveId
+end
+
 function getActiveItemId(id)
     if not id then return false end
 
-    if id == 3049 then
-        return 3086
-    elseif id == 3050 then
-        return 3087
-    elseif id == 3051 then
-        return 3088
-    elseif id == 3052 then
-        return 3089
-    elseif id == 3053 then
-        return 3090
-    elseif id == 3091 then
-        return 3094
-    elseif id == 3092 then
-        return 3095
-    elseif id == 3093 then
-        return 3096
-    elseif id == 3097 then
-        return 3099
-    elseif id == 3098 then
-        return 3100
-    elseif id == 16114 then
-        return 16264
-    elseif id == 23531 then
-        return 23532
-    elseif id == 23533 then
-        return 23534
-    elseif id == 23544 then
-        return 23528
-    elseif id == 23529 then
-        return 23530
-    elseif id == 30343 then -- Sleep Shawl
-        return 30342
-    elseif id == 30344 then -- Enchanted Pendulet
-        return 30345
-    elseif id == 30403 then -- Enchanted Theurgic Amulet
-        return 30402
-    elseif id == 31621 then -- Blister Ring
-        return 31616
-    elseif id == 32621 then -- Ring of Souls
-        return 32635
-    else
-        return id
-    end
+    return ActiveItemIdMap[id] or id
 end
 
 -- returns not dressed item id based on dressed-up id
@@ -614,47 +769,7 @@ end
 function getInactiveItemId(id)
     if not id then return false end
 
-    if id == 3086 then
-        return 3049
-    elseif id == 3087 then
-        return 3050
-    elseif id == 3088 then
-        return 3051
-    elseif id == 3089 then
-        return 3052
-    elseif id == 3090 then
-        return 3053
-    elseif id == 3094 then
-        return 3091
-    elseif id == 3095 then
-        return 3092
-    elseif id == 3096 then
-        return 3093
-    elseif id == 3099 then
-        return 3097
-    elseif id == 3100 then
-        return 3098
-    elseif id == 16264 then
-        return 16114
-    elseif id == 23532 then
-        return 23531
-    elseif id == 23534 then
-        return 23533
-    elseif id == 23530 then
-        return 23529
-    elseif id == 30342 then -- Sleep Shawl
-        return 30343
-    elseif id == 30345 then -- Enchanted Pendulet
-        return 30344
-    elseif id == 30402 then -- Enchanted Theurgic Amulet
-        return 30403
-    elseif id == 31616 then -- Blister Ring
-        return 31621
-    elseif id == 32635 then -- Ring of Souls
-        return 32621
-    else
-        return id
-    end
+    return InactiveItemIdMap[id] or id
 end
 
 -- returns amount of monsters within the range of position
@@ -679,6 +794,50 @@ end
 function distanceFromPlayer(coords)
     if not coords then return false end
     return getDistanceBetween(pos(), coords)
+end
+
+function isTargetInRange(range)
+    if not range then range = 1 end
+    local current = target()
+    if not current then return false end
+    return distanceFromPlayer(current:getPosition()) <= range
+end
+
+function getClosestMonster(range, multifloor)
+    if not range then range = 10 end
+    local closest = nil
+    local bestDistance = nil
+    for _, spec in pairs(getSpectators(multifloor)) do
+        if spec:isMonster() and
+            (g_game.getClientVersion() < 960 or spec:getType() < 3) then
+            local dist = distanceFromPlayer(spec:getPosition())
+            if dist <= range and (not bestDistance or dist < bestDistance) then
+                bestDistance = dist
+                closest = spec
+            end
+        end
+    end
+    return closest
+end
+
+function getStrongestMonster(range, multifloor)
+    if not range then range = 10 end
+    local strongest = nil
+    local bestHp = nil
+    for _, spec in pairs(getSpectators(multifloor)) do
+        if spec:isMonster() and
+            (g_game.getClientVersion() < 960 or spec:getType() < 3) then
+            local dist = distanceFromPlayer(spec:getPosition())
+            if dist <= range then
+                local hp = spec:getHealthPercent()
+                if not bestHp or hp > bestHp then
+                    bestHp = hp
+                    strongest = spec
+                end
+            end
+        end
+    end
+    return strongest
 end
 
 -- returns amount of monsters within the range of local player position
@@ -795,11 +954,218 @@ function getNpcs(range, multifloor)
     return npcs;
 end
 
+local SpectatorsCache = {list = nil, time = 0, range = nil, multifloor = nil}
+function getSpectatorsCached(range, ttl, multifloor)
+    if not ttl then ttl = SPECTATORS_CACHE_TTL end
+    if SpectatorsCache.list and now - SpectatorsCache.time < ttl and
+        SpectatorsCache.range == range and
+        SpectatorsCache.multifloor == multifloor then
+        return SpectatorsCache.list
+    end
+    local specs = getSpectators(multifloor)
+    if range then
+        local filtered = {}
+        for _, spec in pairs(specs) do
+            if distanceFromPlayer(spec:getPosition()) <= range then
+                table.insert(filtered, spec)
+            end
+        end
+        specs = filtered
+    end
+    SpectatorsCache = {
+        list = specs,
+        time = now,
+        range = range,
+        multifloor = multifloor
+    }
+    return specs
+end
+
+function getMonstersCached(range, ttl, multifloor)
+    local specs = getSpectatorsCached(range, ttl, multifloor)
+    local monsters = {}
+    for _, spec in pairs(specs) do
+        if spec:isMonster() and
+            (g_game.getClientVersion() < 960 or spec:getType() < 3) then
+            table.insert(monsters, spec)
+        end
+    end
+    return monsters
+end
+
+function getPlayersCached(range, ttl, multifloor)
+    local specs = getSpectatorsCached(range, ttl, multifloor)
+    local players = {}
+    for _, spec in pairs(specs) do
+        if spec:isPlayer() and not spec:isLocalPlayer() then
+            table.insert(players, spec)
+        end
+    end
+    return players
+end
+
+local TilesCache = {tiles = nil, time = 0, z = nil}
+function getTilesCached(z, ttl)
+    if not ttl then ttl = 200 end
+    if TilesCache.tiles and now - TilesCache.time < ttl and TilesCache.z == z then
+        return TilesCache.tiles
+    end
+    local tiles = g_map.getTiles(z)
+    TilesCache = {tiles = tiles, time = now, z = z}
+    return tiles
+end
+
 -- main function for calculatin item amount in all visible containers
 -- also considers equipped items
 -- returns number
 function itemAmount(id)
     return player:getItemsCount(id)
+end
+
+if not getHealthPercent then
+    function getHealthPercent()
+        if player and player.getHealthPercent then
+            return player:getHealthPercent()
+        end
+        if player and player.getHealth and player.getMaxHealth then
+            local maxHealth = player:getMaxHealth()
+            if maxHealth and maxHealth > 0 then
+                return math.floor((player:getHealth() / maxHealth) * 100)
+            end
+        end
+        return 0
+    end
+end
+
+if not getManaPercent then
+    function getManaPercent()
+        if player and player.getManaPercent then
+            return player:getManaPercent()
+        end
+        if player and player.getMana and player.getMaxMana then
+            local maxMana = player:getMaxMana()
+            if maxMana and maxMana > 0 then
+                return math.floor((player:getMana() / maxMana) * 100)
+            end
+        end
+        return 0
+    end
+end
+
+if not hasManaShield then
+    function hasManaShield()
+        if player and player.hasState and PlayerStates and PlayerStates.ManaShield then
+            return player:hasState(PlayerStates.ManaShield)
+        end
+        if player and player.isManaShielded then
+            return player:isManaShielded()
+        end
+        return false
+    end
+end
+
+if not findItems then
+    function findItems(ids)
+        if type(ids) ~= "table" then return {} end
+        local items = {}
+        for _, id in ipairs(ids) do
+            local item = findItem(id)
+            if item then table.insert(items, item) end
+        end
+        return items
+    end
+end
+
+if not isPositionValid then
+    function isPositionValid(position)
+        if not position then return false end
+        local tile = g_map.getTile(position)
+        return tile and tile:isWalkable() or false
+    end
+end
+
+if not getSpectatorStats then
+    function getSpectatorStats(range, multifloor)
+        if not range then range = 10 end
+        local stats = {monsters = 0, players = 0, npcs = 0, allies = 0}
+        for _, spec in pairs(getSpectators(multifloor)) do
+            if distanceFromPlayer(spec:getPosition()) <= range then
+                if spec:isMonster() and
+                    (g_game.getClientVersion() < 960 or spec:getType() < 3) then
+                    stats.monsters = stats.monsters + 1
+                elseif spec:isNpc() then
+                    stats.npcs = stats.npcs + 1
+                elseif spec:isPlayer() and not spec:isLocalPlayer() then
+                    if isFriend(spec) then
+                        stats.allies = stats.allies + 1
+                    else
+                        stats.players = stats.players + 1
+                    end
+                end
+            end
+        end
+        return stats
+    end
+end
+
+if not getHpPercent then
+    function getHpPercent()
+        return getHealthPercent()
+    end
+end
+
+if not getMpPercent then
+    function getMpPercent()
+        return getManaPercent()
+    end
+end
+
+function useHealingItem(id, minHpPercent)
+    if not id or not minHpPercent then return false end
+    if getHpPercent() > minHpPercent then return false end
+    local item = findItem(id)
+    if not item then return false end
+    return use(item)
+end
+
+function useManaItem(id, minMpPercent)
+    if not id or not minMpPercent then return false end
+    if getMpPercent() > minMpPercent then return false end
+    local item = findItem(id)
+    if not item then return false end
+    return use(item)
+end
+
+function isBuffActive(iconId)
+    if not iconId then return false end
+    return modules.game_cooldown.isCooldownIconActive(iconId)
+end
+
+function autoSwapRing(ringId, hpLow, hpHigh)
+    if not ringId or not hpLow then return false end
+    local hp = getHpPercent()
+    local slotItem = g_game.getLocalPlayer():getInventoryItem(InventorySlotFinger)
+    if hp <= hpLow then
+        if not slotItem or slotItem:getId() ~= ringId then
+            local ring = findItem(ringId)
+            if ring then
+                g_game.move(ring, {x = 65535, y = InventorySlotFinger, z = 0},
+                            ring:getCount())
+                return true
+            end
+        end
+    elseif hpHigh and hp >= hpHigh and slotItem and slotItem:getId() == ringId then
+        for _, container in pairs(getContainers()) do
+            if not containerIsFull(container) then
+                g_game.move(slotItem,
+                            container:getSlotPosition(
+                                container:getItemsCount()),
+                            slotItem:getCount())
+                return true
+            end
+        end
+    end
+    return false
 end
 
 -- self explanatory
@@ -810,6 +1176,94 @@ function useOnInvertoryItem(a, b)
     if not item then return end
 
     return useWith(a, item)
+end
+
+function openBackpacksSequential(list)
+    if type(list) ~= "table" then return false end
+    local index = 1
+    local function openNext()
+        local id = list[index]
+        if not id then return end
+        local item = findItem(id)
+        if item then g_game.open(item, nil) end
+        index = index + 1
+        if list[index] then schedule(300, openNext) end
+    end
+    openNext()
+    return true
+end
+
+function moveItemsBetweenContainers(fromId, toId, itemId)
+    if not fromId or not toId then return false end
+    local source = getContainerByItem(fromId)
+    local target = getContainerByItem(toId, true)
+    if not source or not target then return false end
+    for _, item in ipairs(source:getItems()) do
+        if not itemId or item:getId() == itemId then
+            g_game.move(item, target:getSlotPosition(target:getItemsCount()),
+                        item:getCount())
+            return true
+        end
+    end
+    return false
+end
+
+function getFirstContainerNotFull(id)
+    if type(id) == "number" then
+        return getContainerByItem(id, true)
+    elseif type(id) == "string" then
+        return getContainerByName(id, true)
+    end
+    return nil
+end
+
+function countItemInContainers(id)
+    if not id then return 0 end
+    return itemAmount(id)
+end
+
+function isContainerOpened(nameOrId)
+    for _, container in pairs(getContainers()) do
+        if type(nameOrId) == "number" then
+            if container:getContainerItem():getId() == nameOrId then
+                return true
+            end
+        elseif type(nameOrId) == "string" then
+            if container:getName():lower() == nameOrId:lower() then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function autoStackItems(id)
+    if not id then return false end
+    local moved = false
+    for _, container in pairs(getContainers()) do
+        local target = nil
+        local targetIndex = nil
+        for index, item in ipairs(container:getItems()) do
+            local maxStack = (item.getStackSize and item:getStackSize()) or
+                                 MAX_STACK_SIZE
+            if item:getId() == id and item:isStackable() and
+                item:getCount() < maxStack then
+                target = item
+                targetIndex = index
+                break
+            end
+        end
+        if target then
+            for _, item in ipairs(container:getItems()) do
+                if item ~= target and item:getId() == id and item:isStackable() then
+                    g_game.move(item, container:getSlotPosition(targetIndex),
+                                item:getCount())
+                    moved = true
+                end
+            end
+        end
+    end
+    return moved
 end
 
 -- pos can be tile or position
@@ -831,6 +1285,79 @@ function getNearTiles(pos)
     end
 
     return tiles
+end
+
+function isHole(pos)
+    local tile = pos
+    if type(pos) == "table" and pos.x then
+        tile = g_map.getTile(pos)
+    end
+    if tile and tile.isHole then
+        return tile:isHole()
+    end
+    local thing = tile and tile.getTopUseThing and tile:getTopUseThing() or nil
+    if thing and thing.isHole then
+        return thing:isHole()
+    end
+    return false
+end
+
+function isStair(pos)
+    local position = pos
+    if type(pos) ~= "table" then
+        position = pos:getPosition()
+    end
+    local minimapColor = g_map.getMinimapColor(position)
+    return minimapColor >= MINIMAP_COLOR_STAIR_MIN and
+               minimapColor <= MINIMAP_COLOR_STAIR_MAX
+end
+
+function getWalkableTiles(range)
+    if not range then range = 6 end
+    local tiles = {}
+    for _, tile in pairs(g_map.getTiles(posz())) do
+        if tile:isWalkable() and distanceFromPlayer(tile:getPosition()) <= range then
+            table.insert(tiles, tile)
+        end
+    end
+    return tiles
+end
+
+function findPathTo(position, maxDist)
+    if not position then return false end
+    return findPath(pos(), position, maxDist or 20,
+                    {ignoreNonPathable = true, precision = 1})
+end
+
+function isPositionSafe(position, range)
+    if not position then return false end
+    if not range then range = 6 end
+    local specs = getSpectatorsCached(nil, SPECTATORS_CACHE_TTL, true)
+    for _, spec in pairs(specs) do
+        local distance = getDistanceBetween(position, spec:getPosition())
+        if distance <= range then
+            if spec:isMonster() and
+                (g_game.getClientVersion() < 960 or spec:getType() < 3) then
+                return false
+            end
+            if spec:isPlayer() and not spec:isLocalPlayer() and
+                not isFriend(spec:getName()) then
+                return false
+            end
+        end
+    end
+    return true
+end
+
+function walkToSafeTile(range)
+    local tiles = getWalkableTiles(range)
+    for _, tile in ipairs(tiles) do
+        if isPositionSafe(tile:getPosition(), range) then
+            return autoWalk(tile:getPosition(), 20,
+                            {ignoreNonPathable = true, precision = 1})
+        end
+    end
+    return false
 end
 
 -- self explanatory
@@ -861,6 +1388,7 @@ function reachGroundItem(id)
     if not id then return false end
 
     local dest = nil
+    local destPos = nil
     for i, tile in ipairs(g_map.getTiles(posz())) do
         for j, item in ipairs(tile:getItems()) do
             local iPos = item:getPosition()
@@ -869,6 +1397,7 @@ function reachGroundItem(id)
                 if findPath(pos(), iPos, 20,
                             {ignoreNonPathable = true, precision = 1}) then
                     dest = item
+                    destPos = iPos
                     break
                 end
             end
@@ -876,7 +1405,7 @@ function reachGroundItem(id)
     end
 
     if dest then
-        return autoWalk(iPos, 20, {ignoreNonPathable = true, precision = 1})
+        return autoWalk(destPos, 20, {ignoreNonPathable = true, precision = 1})
     else
         return false
     end
@@ -937,6 +1466,119 @@ function targetPos(dist)
     else
         return target():getPosition()
     end
+end
+
+function getPartyMembers()
+    local members = {}
+    for _, spec in pairs(getSpectators()) do
+        if spec:isPlayer() and (spec:isPartyMember() or spec:isPartyLeader()) then
+            table.insert(members, spec)
+        end
+    end
+    return members
+end
+
+function isPartyLeader()
+    local localPlayer = g_game.getLocalPlayer()
+    if localPlayer and localPlayer.isPartyLeader then
+        return localPlayer:isPartyLeader()
+    end
+    return false
+end
+
+function getClosestFriend(range)
+    if not range then range = 10 end
+    local closest = nil
+    local bestDistance = nil
+    for _, spec in pairs(getSpectators()) do
+        if spec:isPlayer() and not spec:isLocalPlayer() and
+            isFriend(spec:getName()) then
+            local dist = distanceFromPlayer(spec:getPosition())
+            if dist <= range and (not bestDistance or dist < bestDistance) then
+                closest = spec
+                bestDistance = dist
+            end
+        end
+    end
+    return closest
+end
+
+function followPlayer(name, range)
+    if not name then return false end
+    if not range then range = 1 end
+    local targetPlayer = getCreatureByName(name, true)
+    if not targetPlayer then return false end
+    if distanceFromPlayer(targetPlayer:getPosition()) > range then
+        return autoWalk(targetPlayer:getPosition(), 20,
+                        {ignoreNonPathable = true, precision = 1})
+    end
+    return false
+end
+
+function healFriend(name, spell, minHpPercent)
+    if not name or not spell or not minHpPercent then return false end
+    local friend = getCreatureByName(name, true)
+    if not friend or not friend:isPlayer() then return false end
+    if friend:getHealthPercent() > minHpPercent then return false end
+    if not canCast(spell) then return false end
+    return cast(spell)
+end
+
+function isEnemyNearby(range)
+    if not range then range = 10 end
+    for _, spec in pairs(getSpectators(true)) do
+        if spec:isPlayer() and not spec:isLocalPlayer() and
+            distanceFromPlayer(spec:getPosition()) <= range and
+            isEnemy(spec:getName()) then
+            return true
+        end
+    end
+    return false
+end
+
+function isRedSkullNearby(range)
+    if not range then range = 10 end
+    for _, spec in pairs(getSpectators(true)) do
+        if spec:isPlayer() and not spec:isLocalPlayer() and
+            distanceFromPlayer(spec:getPosition()) <= range then
+            local skull = spec.getSkull and spec:getSkull() or 0
+            if skull >= 4 then return true end
+        end
+    end
+    return false
+end
+
+function countSkulls(range)
+    if not range then range = 10 end
+    local count = 0
+    for _, spec in pairs(getSpectators(true)) do
+        if spec:isPlayer() and not spec:isLocalPlayer() and
+            distanceFromPlayer(spec:getPosition()) <= range then
+            local skull = spec.getSkull and spec:getSkull() or 0
+            if skull > 0 then count = count + 1 end
+        end
+    end
+    return count
+end
+
+function alertOnPlayer(name, range)
+    if not name then return false end
+    if not range then range = 10 end
+    local creature = getCreatureByName(name, true)
+    if creature and distanceFromPlayer(creature:getPosition()) <= range then
+        logWarn("Player nearby: "..name)
+        return true
+    end
+    return false
+end
+
+function autoLogoutOnDanger(range)
+    if not range then range = 10 end
+    if not isSafe(range, true, 0) then
+        g_game.safeLogout()
+        return true
+    end
+    return false
 end
 
 -- for gunzodus/ezodus only
