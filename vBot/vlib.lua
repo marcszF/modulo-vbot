@@ -8,7 +8,10 @@ vBot.standTime = now
 vBot.isUsingPotion = false
 vBot.isUsing = false
 vBot.customCooldowns = {}
-local MAX_STACK_SIZE = 100
+local MAX_STACK_SIZE = (rawget(_G, "storage") and storage.maxStackSize) or 100
+local SPELL_CACHE_LIMIT = 200
+local MINIMAP_COLOR_STAIR_MIN = 210
+local MINIMAP_COLOR_STAIR_MAX = 213
 
 function logInfo(text)
     local timestamp = os.date("%H:%M:%S")
@@ -34,13 +37,23 @@ function logError(text)
     return modules.client_terminal.addLine(start..text, "red")
 end
 
-function logTable(tbl, prefix)
+function logTable(tbl, prefix, visited, depth, maxDepth)
     if type(tbl) ~= "table" then return logInfo(tostring(tbl)) end
     prefix = prefix or ""
+    visited = visited or {}
+    depth = depth or 0
+    maxDepth = maxDepth or 5
+    if visited[tbl] then
+        return logInfo(prefix.."*circular*")
+    end
+    if depth > maxDepth then
+        return logInfo(prefix.."*max depth*")
+    end
+    visited[tbl] = true
     for key, value in pairs(tbl) do
         if type(value) == "table" then
             logInfo(prefix..tostring(key)..":")
-            logTable(value, prefix.."  ")
+            logTable(value, prefix.."  ", visited, depth + 1, maxDepth)
         else
             logInfo(prefix..tostring(key)..": "..tostring(value))
         end
@@ -437,6 +450,7 @@ end
 -- ie:['Spell Name'] = {id, words, exhaustion, premium, type, icon, mana, level, soul, group, vocations}
 -- cooldown detection module
 local SpellDataCache = {}
+local SpellDataCacheCount = 0
 function getSpellData(spell)
     if not spell then return false end
     spell = spell:lower()
@@ -463,6 +477,13 @@ function getSpellData(spell)
         result = Spells[t]
     elseif c then
         result = c
+    end
+    if not SpellDataCache[spell] then
+        SpellDataCacheCount = SpellDataCacheCount + 1
+        if SpellDataCacheCount > SPELL_CACHE_LIMIT then
+            SpellDataCache = {}
+            SpellDataCacheCount = 0
+        end
     end
     SpellDataCache[spell] = {result = result, time = now}
     return result
@@ -1281,7 +1302,8 @@ function isStair(pos)
         position = pos:getPosition()
     end
     local minimapColor = g_map.getMinimapColor(position)
-    return minimapColor >= 210 and minimapColor <= 213
+    return minimapColor >= MINIMAP_COLOR_STAIR_MIN and
+               minimapColor <= MINIMAP_COLOR_STAIR_MAX
 end
 
 function getWalkableTiles(range)
