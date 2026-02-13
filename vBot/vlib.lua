@@ -432,13 +432,12 @@ end
 -- returns table
 -- ie:['Spell Name'] = {id, words, exhaustion, premium, type, icon, mana, level, soul, group, vocations}
 -- cooldown detection module
-local SpellDataCache = {data = {}, time = 0}
+local SpellDataCache = {}
 function getSpellData(spell)
     if not spell then return false end
     spell = spell:lower()
-    if SpellDataCache.data[spell] and now - SpellDataCache.time < 5000 then
-        return SpellDataCache.data[spell]
-    end
+    local cached = SpellDataCache[spell]
+    if cached and now - cached.time < 5000 then return cached.result end
     local t = nil
     local c = nil
     for k, v in pairs(Spells) do
@@ -461,8 +460,7 @@ function getSpellData(spell)
     elseif c then
         result = c
     end
-    SpellDataCache.data[spell] = result
-    SpellDataCache.time = now
+    SpellDataCache[spell] = {result = result, time = now}
     return result
 end
 
@@ -1454,7 +1452,8 @@ function getClosestFriend(range)
     local closest = nil
     local bestDistance = nil
     for _, spec in pairs(getSpectators()) do
-        if spec:isPlayer() and not spec:isLocalPlayer() and isFriend(spec) then
+        if spec:isPlayer() and not spec:isLocalPlayer() and
+            isFriend(spec:getName()) then
             local dist = distanceFromPlayer(spec:getPosition())
             if dist <= range and (not bestDistance or dist < bestDistance) then
                 closest = spec
@@ -1490,7 +1489,8 @@ function isEnemyNearby(range)
     if not range then range = 10 end
     for _, spec in pairs(getSpectators(true)) do
         if spec:isPlayer() and not spec:isLocalPlayer() and
-            distanceFromPlayer(spec:getPosition()) <= range and isEnemy(spec) then
+            distanceFromPlayer(spec:getPosition()) <= range and
+            isEnemy(spec:getName()) then
             return true
         end
     end
