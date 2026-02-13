@@ -8,9 +8,11 @@ vBot.standTime = now
 vBot.isUsingPotion = false
 vBot.isUsing = false
 vBot.customCooldowns = {}
-local MAX_STACK_SIZE = (rawget(_G, "storage") and storage.maxStackSize) or 100 -- default stack size (override via storage.maxStackSize if needed)
+-- default stack size (override via storage.maxStackSize if needed)
+local MAX_STACK_SIZE = (rawget(_G, "storage") and storage.maxStackSize) or 100
 local SPELL_CACHE_LIMIT = 200
 local SPELL_CACHE_TTL = 5000
+local SPECTATORS_CACHE_TTL = 100
 local MINIMAP_COLOR_STAIR_MIN = 210
 local MINIMAP_COLOR_STAIR_MAX = 213
 
@@ -456,16 +458,7 @@ function getSpellData(spell)
     if not spell then return false end
     spell = spell:lower()
     local cached = SpellDataCache[spell]
-    if cached and now - cached.time < SPELL_CACHE_TTL then
-        for i, key in ipairs(SpellDataCacheOrder) do
-            if key == spell then
-                table.remove(SpellDataCacheOrder, i)
-                break
-            end
-        end
-        table.insert(SpellDataCacheOrder, spell)
-        return cached.result
-    end
+    if cached and now - cached.time < SPELL_CACHE_TTL then return cached.result end
     local t = nil
     local c = nil
     for k, v in pairs(Spells) do
@@ -488,16 +481,12 @@ function getSpellData(spell)
     elseif c then
         result = c
     end
-    for i, key in ipairs(SpellDataCacheOrder) do
-        if key == spell then
-            table.remove(SpellDataCacheOrder, i)
-            break
+    if not SpellDataCache[spell] then
+        table.insert(SpellDataCacheOrder, spell)
+        if #SpellDataCacheOrder > SPELL_CACHE_LIMIT then
+            local oldest = table.remove(SpellDataCacheOrder, 1)
+            SpellDataCache[oldest] = nil
         end
-    end
-    table.insert(SpellDataCacheOrder, spell)
-    if #SpellDataCacheOrder > SPELL_CACHE_LIMIT then
-        local oldest = table.remove(SpellDataCacheOrder, 1)
-        SpellDataCache[oldest] = nil
     end
     SpellDataCache[spell] = {result = result, time = now}
     return result
@@ -967,7 +956,7 @@ end
 
 local SpectatorsCache = {list = nil, time = 0, range = nil, multifloor = nil}
 function getSpectatorsCached(range, ttl, multifloor)
-    if not ttl then ttl = 100 end
+    if not ttl then ttl = SPECTATORS_CACHE_TTL end
     if SpectatorsCache.list and now - SpectatorsCache.time < ttl and
         SpectatorsCache.range == range and
         SpectatorsCache.multifloor == multifloor then
@@ -1255,7 +1244,7 @@ function autoStackItems(id)
         local target = nil
         local targetIndex = nil
         for index, item in ipairs(container:getItems()) do
-            local maxStack = item.getStackSize and item:getStackSize() or
+            local maxStack = (item.getStackSize and item:getStackSize()) or
                                  MAX_STACK_SIZE
             if item:getId() == id and item:isStackable() and
                 item:getCount() < maxStack then
@@ -1343,7 +1332,7 @@ end
 function isPositionSafe(position, range)
     if not position then return false end
     if not range then range = 6 end
-    local specs = getSpectatorsCached(nil, 100, true)
+    local specs = getSpectatorsCached(nil, SPECTATORS_CACHE_TTL, true)
     for _, spec in pairs(specs) do
         local distance = getDistanceBetween(position, spec:getPosition())
         if distance <= range then
