@@ -1,0 +1,51 @@
+setDefaultTab("Main")
+
+local BAL_CMD = "!balance"
+local lastBalance = nil
+local startBalance = nil
+local startTime = now
+
+local balanceLabel = UI.Label("Balance: ...")
+local rateLabel = UI.Label("Rate/h: ...")
+
+UI.Button("Reset Balance", function()
+  lastBalance = nil
+  startBalance = nil
+  startTime = now
+  balanceLabel:setText("Balance: ...")
+  rateLabel:setText("Rate/h: ...")
+  warn("[Balance] Resetado")
+end)
+
+local function parseBalance(text)
+  local n = text:match("balance is%s+([%d,]+)")
+  if not n then return nil end
+  n = n:gsub(",", "")
+  return tonumber(n)
+end
+
+-- envia comando a cada 30s
+macro(30000, "Auto Balance", function()
+  if g_game.isOnline() then
+    say(BAL_CMD)
+  end
+end)
+
+onTextMessage(function(mode, text)
+  -- Server Log normalmente chega por aqui também
+  local bal = parseBalance(text)
+  if not bal then return end
+
+  lastBalance = bal
+  if not startBalance then
+    startBalance = bal
+    startTime = now
+  end
+
+  local elapsedHours = math.max((now - startTime) / (1000 * 60 * 60), 0.0001)
+  local diff = bal - startBalance
+  local rate = diff / elapsedHours
+
+  balanceLabel:setText("Balance: " .. tostring(bal))
+  rateLabel:setText(string.format("Rate/h: %.2f", rate))
+end)

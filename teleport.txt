@@ -1,0 +1,67 @@
+local flyPoints = {
+  {x = 1000, y = 1000, z = 7, comando = "!fly", destino = "salao hunts",  botao = "teleport"},
+  {x = 1050, y = 1020, z = 7, comando = "!fly", destino = "temple",       botao = "teleport"},
+  {x = 1100, y = 1080, z = 7, comando = "!fly", destino = "trainers",     botao = "teleport"},
+}
+
+local FLY_RANGE = 3
+local FLY_COOLDOWN = 5000
+local lastFlyTime = 0
+local pendingDestino = nil
+local pendingBotao = nil
+local modalRegistered = false
+
+-- ✅ Mesma estrutura do script original
+local function onModalWindow(data)
+  if not pendingDestino then return end
+
+  local choiceId = nil
+  for _, choice in ipairs(data.choices) do
+    if choice.text:lower():find(pendingDestino:lower()) then
+      choiceId = choice.id
+      break
+    end
+  end
+
+  if choiceId then
+    for _, button in ipairs(data.buttons) do
+      if button.text:lower():find(pendingBotao:lower()) then
+        Game.modalWindowAnswer(data.id, button.id, choiceId, true)
+        Game.unregisterEvent(Game.Events.MODAL_WINDOW, onModalWindow)
+        warn("[AutoFly] Teleportado para '" .. pendingDestino .. "'")
+        pendingDestino = nil
+        pendingBotao = nil
+        modalRegistered = false
+      end
+    end
+  end
+end
+
+-- ✅ Checa posição a cada 1s
+macro(1000, "Auto Fly", function()
+  if not g_game.isOnline() then return end
+
+  local now = os.clock() * 1000
+  if (now - lastFlyTime) < FLY_COOLDOWN then return end
+  if pendingDestino then return end
+
+  local pos = player:getPosition()
+
+  for _, fp in ipairs(flyPoints) do
+    local dx = math.abs(pos.x - fp.x)
+    local dy = math.abs(pos.y - fp.y)
+    if dx <= FLY_RANGE and dy <= FLY_RANGE and pos.z == fp.z then
+      -- ✅ define destino e registra evento (igual ao original)
+      pendingDestino = fp.destino
+      pendingBotao = fp.botao
+      lastFlyTime = now
+      modalRegistered = true
+
+      Game.registerEvent(Game.Events.MODAL_WINDOW, onModalWindow)
+      Game.talk(fp.comando, 1)
+
+      warn("[AutoFly] " .. pos.x .. "," .. pos.y .. "," .. pos.z .. " → " .. fp.destino)
+      return
+    end
+  end
+end)
