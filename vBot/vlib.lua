@@ -8,6 +8,7 @@ vBot.standTime = now
 vBot.isUsingPotion = false
 vBot.isUsing = false
 vBot.customCooldowns = {}
+local MAX_STACK_SIZE = 100
 
 function logInfo(text)
     local timestamp = os.date("%H:%M:%S")
@@ -1218,7 +1219,8 @@ function autoStackItems(id)
         local target = nil
         local targetIndex = nil
         for index, item in ipairs(container:getItems()) do
-            if item:getId() == id and item:isStackable() and item:getCount() < 100 then
+            if item:getId() == id and item:isStackable() and
+                item:getCount() < MAX_STACK_SIZE then
                 target = item
                 targetIndex = index
                 break
